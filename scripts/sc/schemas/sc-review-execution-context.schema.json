@@ -1,0 +1,411 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://godotgame.local/schemas/sc-review-execution-context.schema.json",
+  "title": "sc-review execution-context",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "run_id",
+    "status",
+    "failed_step"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "cmd": {
+      "const": "sc-review-pipeline"
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    },
+    "requested_run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_type": {
+      "type": "string",
+      "enum": [
+        "planned-only",
+        "preflight-only",
+        "llm-only",
+        "deterministic-only",
+        "full"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reuse_mode": {
+      "type": "string",
+      "enum": [
+        "none",
+        "full-clean-reuse",
+        "deterministic-only-reuse",
+        "sc-test-reuse",
+        "mixed-reuse"
+      ]
+    },
+    "started_at_utc": {
+      "type": "string",
+      "minLength": 1
+    },
+    "finished_at_utc": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "fail"
+      ]
+    },
+    "failure_kind": {
+      "type": "string",
+      "enum": [
+        "schema-invalid",
+        "stale-latest",
+        "artifact-missing",
+        "artifact-incomplete",
+        "aborted",
+        "step-failed",
+        "review-needs-fix",
+        "ok"
+      ]
+    },
+    "delivery_profile": {
+      "type": "string",
+      "minLength": 1
+    },
+    "security_profile": {
+      "type": "string",
+      "enum": [
+        "strict",
+        "host-safe"
+      ]
+    },
+    "failed_step": {
+      "type": "string"
+    },
+    "paths": {
+      "type": "object"
+    },
+    "git": {
+      "type": "object"
+    },
+    "recovery": {
+      "type": "object"
+    },
+    "marathon": {
+      "type": "object"
+    },
+    "agent_review": {
+      "type": "object"
+    },
+    "recommended_action": {
+      "type": "string"
+    },
+    "recommended_action_why": {
+      "type": "string"
+    },
+    "candidate_commands": {
+      "type": "object"
+    },
+    "recommended_command": {
+      "type": "string"
+    },
+    "forbidden_commands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "latest_summary_signals": {
+      "type": "object"
+    },
+    "chapter6_hints": {
+      "type": "object"
+    },
+    "llm_review": {
+      "type": "object"
+    },
+    "approval": {
+      "$ref": "#/$defs/approval"
+    },
+    "diagnostics": {
+      "$ref": "#/$defs/diagnostics"
+    }
+  },
+  "$defs": {
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "soft_gate": {
+          "type": "boolean"
+        },
+        "required_action": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "decision": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "request_path": {
+          "type": "string"
+        },
+        "response_path": {
+          "type": "string"
+        },
+        "recommended_action": {
+          "type": "string"
+        },
+        "allowed_actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile_drift": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "previous_run_id": {
+              "type": "string"
+            },
+            "previous_out_dir": {
+              "type": "string"
+            },
+            "previous_delivery_profile": {
+              "type": "string"
+            },
+            "previous_security_profile": {
+              "type": "string"
+            },
+            "current_delivery_profile": {
+              "type": "string"
+            },
+            "current_security_profile": {
+              "type": "string"
+            }
+          }
+        },
+        "acceptance_preflight": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "source_summary_file": {
+              "type": "string"
+            }
+          }
+        },
+        "waste_signals": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "unit_failed_but_engine_lane_ran": {
+              "type": "boolean"
+            }
+          }
+        },
+        "rerun_guard": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "blocked": {
+              "type": "boolean"
+            },
+            "recommended_path": {
+              "type": "string"
+            },
+            "override": {
+              "type": "string"
+            },
+            "fingerprint": {
+              "type": "string"
+            }
+          }
+        },
+        "reuse_decision": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "blocked": {
+              "type": "boolean"
+            }
+          }
+        },
+        "llm_timeout_memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "overrides": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            },
+            "planned_agents": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "change_scope_ceiling": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "blocked": {
+              "type": "boolean"
+            },
+            "recommended_path": {
+              "type": "string"
+            },
+            "deterministic_strategy": {
+              "type": "string"
+            },
+            "changed_paths_count": {
+              "type": "integer"
+            },
+            "unsafe_paths_count": {
+              "type": "integer"
+            },
+            "allow_override_flag": {
+              "type": "string"
+            },
+            "changed_paths_sample": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "unsafe_paths_sample": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "profile_drift_present": {
+              "type": "boolean"
+            },
+            "ceilings": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "changed_paths": {
+                  "type": "integer"
+                },
+                "unsafe_paths": {
+                  "type": "integer"
+                },
+                "profile_drift_changed_paths": {
+                  "type": "integer"
+                },
+                "profile_drift_unsafe_paths": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "llm_retry_stop_loss": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "blocked": {
+              "type": "boolean"
+            },
+            "step_name": {
+              "type": "string"
+            },
+            "timed_out_step": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "retry_count": {
+              "type": "integer"
+            },
+            "deterministic_ok": {
+              "type": "boolean"
+            }
+          }
+        },
+        "sc_test_retry_stop_loss": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "blocked": {
+              "type": "boolean"
+            },
+            "step_name": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "retry_count": {
+              "type": "integer"
+            },
+            "deterministic_ok": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    }
+  }
+}

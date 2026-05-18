@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://godotgame.local/schemas/sc-project-health-dashboard.schema.json",
+  "title": "sc-project-health-dashboard",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "status",
+    "generated_at",
+    "records",
+    "report_catalog_summary",
+    "active_task_summary",
+    "project_overview"
+  ],
+  "properties": {
+    "kind": {
+      "const": "project-health-dashboard"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "warn", "fail"]
+    },
+    "generated_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "status", "summary", "stage", "latest_json", "history_json"],
+        "properties": {
+          "kind": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "minLength": 1 },
+          "summary": { "type": "string" },
+          "stage": { "type": "string" },
+          "latest_json": { "type": "string", "minLength": 1 },
+          "history_json": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "report_catalog_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total_json", "invalid_json", "catalog_json"],
+      "properties": {
+        "total_json": { "type": "integer", "minimum": 0 },
+        "invalid_json": { "type": "integer", "minimum": 0 },
+        "catalog_json": { "type": "string", "minLength": 1 }
+      }
+    },
+    "active_task_summary": {
+      "type": "object",
+      "required": ["total", "clean", "top_records"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "clean": { "type": "integer", "minimum": 0 },
+        "top_records": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["task_id", "status", "recommended_action"],
+            "properties": {
+              "task_id": { "type": "string", "minLength": 1 },
+              "status": { "type": "string", "minLength": 1 },
+              "recommended_action": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "project_overview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["game_name", "game_type", "documents", "prototype_core", "game_type_specifics"],
+      "properties": {
+        "game_name": { "type": "string" },
+        "game_type": { "type": "string" },
+        "documents": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["prd", "gdd", "prototype"],
+          "properties": {
+            "prd": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "gdd": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "prototype": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+          }
+        },
+        "prototype_core": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["game_feature", "core_gameplay_loop", "win_fail_conditions"],
+          "properties": {
+            "game_feature": { "type": "string" },
+            "core_gameplay_loop": { "type": "string" },
+            "win_fail_conditions": { "type": "string" }
+          }
+        },
+        "game_type_specifics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["game_type", "guide_path", "selected_sections"],
+          "properties": {
+            "game_type": { "type": "string" },
+            "guide_path": { "type": "string" },
+            "selected_sections": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "title", "answer"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "title": { "type": "string" },
+                  "answer": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

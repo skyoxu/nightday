@@ -1,0 +1,20 @@
+Single retro JRPG enemy battle sprite on a 100% solid flat magenta background (#FF00FF). Inspired by Dragon Quest monster design language, but original and not copied.
+
+Character:
+- a mischievous blue slime fused with a tiny bronze knight helmet
+- expressive eyes
+- small spear
+- cute but still battle-capable
+
+Style:
+- clean 16-bit pixel art
+- full body
+- readable at game scale
+- centered with generous magenta margin
+- background is ONLY solid flat magenta (#FF00FF)
+- no text, no UI, no frame
+
+Pose:
+- enemy idle pose
+- facing slightly left
+- suitable for a battle loop showcase

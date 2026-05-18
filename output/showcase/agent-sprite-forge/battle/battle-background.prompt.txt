@@ -1,0 +1,10 @@
+Retro JRPG battle background inspired by Dragon Quest field battles. No characters, no UI, no text, no effects overlays.
+
+Show a clean battle field with:
+- grassy ground lane for combat
+- distant mountains
+- a few trees and shrubs at the horizon
+- bright readable sky
+- simple classic 16-bit JRPG composition
+
+The scene should be readable behind sprites and not distract from combatants. Keep the foreground open and uncluttered. Pixel-art style, polished, colorful, game-ready.

@@ -1,0 +1,19 @@
+{
+  "base_url": "https://www.aiartmirror.com/v1",
+  "request": {
+    "model": "gpt-image-2",
+    "prompt": "A tiny retro JRPG chest icon on a plain background",
+    "size": "auto",
+    "quality": "auto",
+    "output_format": "png",
+    "response_format": "b64_json"
+  },
+  "extra_body": {
+    "group": "gpt-image-2"
+  },
+  "out": "output\\imagegen\\defaulted-chest.png",
+  "api_key_env": "AIARTMIRROR_API_KEY",
+  "model_env": "AIARTMIRROR_IMAGE_MODEL",
+  "group_env": "AIARTMIRROR_IMAGE_GROUP",
+  "result_count": 1
+}

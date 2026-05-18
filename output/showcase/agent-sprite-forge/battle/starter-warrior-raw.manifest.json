@@ -1,0 +1,19 @@
+{
+  "base_url": "https://www.aiartmirror.com/v1",
+  "request": {
+    "model": "gpt-image-2",
+    "prompt": "Single retro JRPG hero battle sprite on a 100% solid flat magenta background (#FF00FF). Dragon Quest inspired more than Final Fantasy, but original design.\n\nCharacter:\n- young heroic warrior\n- blue tunic, small cape, leather boots\n- sword and round shield\n- confident but simple classic JRPG silhouette\n\nStyle:\n- clean 16-bit pixel art\n- full body\n- readable at game scale\n- centered with generous magenta margin\n- no background scene\n- background is ONLY solid flat magenta (#FF00FF)\n- no text, no UI, no frame\n\nPose:\n- battle-ready idle pose\n- facing slightly right\n- suitable for a starter selection and battle loop showcase",
+    "size": "auto",
+    "quality": "auto",
+    "output_format": "png",
+    "response_format": "b64_json"
+  },
+  "extra_body": {
+    "group": "gpt-image-2"
+  },
+  "out": "C:\\buildgame\\nightday\\godotgame\\output\\showcase\\agent-sprite-forge\\battle\\starter-warrior-raw.png",
+  "api_key_env": "AIARTMIRROR_API_KEY",
+  "model_env": "AIARTMIRROR_IMAGE_MODEL",
+  "group_env": "AIARTMIRROR_IMAGE_GROUP",
+  "result_count": 1
+}

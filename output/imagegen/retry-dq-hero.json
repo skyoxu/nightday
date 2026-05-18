@@ -1,0 +1,17 @@
+{
+  "base_url": "https://www.aiartmirror.com/v1",
+  "request": {
+    "model": "gpt-image-2",
+    "prompt": "来一张类似勇者斗恶龙主角在大地图上的像素风的图片，128*128",
+    "size": "auto",
+    "quality": "auto",
+    "output_format": "png",
+    "response_format": "b64_json"
+  },
+  "extra_body": {
+    "group": "gpt-image-2"
+  },
+  "out": "output\\imagegen\\retry-dq-hero.png",
+  "api_key_env": "AIARTMIRROR_API_KEY",
+  "result_count": 1
+}

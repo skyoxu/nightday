@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://godotgame.local/schemas/sc-run-event.schema.json",
+  "title": "sc-run-event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ts",
+    "event",
+    "event_family",
+    "task_id",
+    "run_id",
+    "turn_id",
+    "turn_seq",
+    "delivery_profile",
+    "security_profile",
+    "item_kind",
+    "item_id",
+    "step_name",
+    "status",
+    "details"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ts": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event_family": {
+      "type": "string",
+      "enum": [
+        "acceptance-preflight",
+        "approval",
+        "custom",
+        "recovery",
+        "reviewer",
+        "run",
+        "runtime-guard",
+        "sidecar",
+        "step"
+      ]
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "turn_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "turn_seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "delivery_profile": {
+      "type": "string",
+      "minLength": 1
+    },
+    "security_profile": {
+      "type": "string",
+      "minLength": 1
+    },
+    "item_kind": {
+      "type": "string",
+      "enum": [
+        "approval",
+        "reviewer",
+        "run",
+        "sidecar",
+        "step",
+        "task"
+      ]
+    },
+    "item_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "step_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "details": {
+      "type": "object"
+    }
+  }
+}

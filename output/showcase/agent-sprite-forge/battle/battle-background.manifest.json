@@ -1,0 +1,19 @@
+{
+  "base_url": "https://www.aiartmirror.com/v1",
+  "request": {
+    "model": "gpt-image-2",
+    "prompt": "Retro JRPG battle background inspired by Dragon Quest field battles. No characters, no UI, no text, no effects overlays.\n\nShow a clean battle field with:\n- grassy ground lane for combat\n- distant mountains\n- a few trees and shrubs at the horizon\n- bright readable sky\n- simple classic 16-bit JRPG composition\n\nThe scene should be readable behind sprites and not distract from combatants. Keep the foreground open and uncluttered. Pixel-art style, polished, colorful, game-ready.",
+    "size": "auto",
+    "quality": "auto",
+    "output_format": "png",
+    "response_format": "b64_json"
+  },
+  "extra_body": {
+    "group": "gpt-image-2"
+  },
+  "out": "C:\\buildgame\\nightday\\godotgame\\output\\showcase\\agent-sprite-forge\\battle\\battle-background.png",
+  "api_key_env": "AIARTMIRROR_API_KEY",
+  "model_env": "AIARTMIRROR_IMAGE_MODEL",
+  "group_env": "AIARTMIRROR_IMAGE_GROUP",
+  "result_count": 1
+}

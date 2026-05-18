@@ -1,0 +1,21 @@
+Single retro JRPG hero battle sprite on a 100% solid flat magenta background (#FF00FF). Dragon Quest inspired more than Final Fantasy, but original design.
+
+Character:
+- young heroic warrior
+- blue tunic, small cape, leather boots
+- sword and round shield
+- confident but simple classic JRPG silhouette
+
+Style:
+- clean 16-bit pixel art
+- full body
+- readable at game scale
+- centered with generous magenta margin
+- no background scene
+- background is ONLY solid flat magenta (#FF00FF)
+- no text, no UI, no frame
+
+Pose:
+- battle-ready idle pose
+- facing slightly right
+- suitable for a starter selection and battle loop showcase

@@ -1,0 +1,29 @@
+# ADR 索引 — Godot 迁移（Accepted + Addenda）
+
+本文件用于快速定位与 Godot + C# 模板相关的 ADR（以 `docs/adr/` 为唯一口径）。
+
+## 已采纳（Accepted）
+- ADR-0015: 性能预算与门禁（Godot） — `docs/adr/ADR-0015-performance-budgets-and-gates.md`
+- ADR-0018: Godot 运行时与分发 — `docs/adr/ADR-0018-godot-runtime-and-distribution.md`
+- ADR-0019: Godot 安全基线 — `docs/adr/ADR-0019-godot-security-baseline.md`
+- ADR-0020: Contracts 落盘位置标准化 — `docs/adr/ADR-0020-contract-location-standardization.md`
+- ADR-0021: C# 领域层架构 — `docs/adr/ADR-0021-csharp-domain-layer-architecture.md`
+- ADR-0022: Godot Signal 与契约约定 — `docs/adr/ADR-0022-godot-signal-system-and-contracts.md`
+- ADR-0023: Settings SSoT = ConfigFile（user://） — `docs/adr/ADR-0023-settings-ssot-configfile.md`
+- ADR-0024: 模板谱系与命名口径（Template Lineage & Naming） — `docs/adr/ADR-0024-template-lineage-and-naming.md`
+- ADR-0025: Godot 测试策略（xUnit + GdUnit4） — `docs/adr/ADR-0025-godot-test-strategy.md`
+- ADR-0026: 事件发布失败策略（PublishAsync Failure Semantics） — `docs/adr/ADR-0026-event-publish-failure-strategy.md`
+- ADR-0027: 所有权唯一写入口（Ownership Write Entry） — `docs/adr/ADR-0027-ownership-write-entry.md`
+- ADR-0028: 事件用途分级（Gameplay vs UI vs Audit/Observability） — `docs/adr/ADR-0028-event-usage-tiering.md`
+- ADR-0029: 错误处理口径（Exceptions vs Try*/Result vs Fail-Fast） — `docs/adr/ADR-0029-error-handling-policy.md`
+- ADR-0030: Core 线程模型（Single-Thread Core + 明确跨线程边界） — `docs/adr/ADR-0030-core-threading-model.md`
+- ADR-0031: Security Profile（host-safe 默认，strict 可选） — `docs/adr/ADR-0031-security-profile-host-safe-default.md`
+
+## 附录（Addenda）
+- ADR-0005 Addendum: Godot+C# 质量门禁补充 — `docs/adr/addenda/ADR-0005-godot-quality-gates-addendum.md`
+- ADR-0006 Addendum: Godot 数据存储补充 — `docs/adr/addenda/ADR-0006-godot-data-storage-addendum.md`
+
+## Security Baseline Bundle
+
+- Evaluate security decisions as a bundle: `ADR-0019` + `ADR-0031` + `ADR-0005`.
+- Default posture is `host-safe`; `strict` is phase-based and explicit.

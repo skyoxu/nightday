@@ -1,0 +1,19 @@
+{
+  "base_url": "https://www.aiartmirror.com/v1",
+  "request": {
+    "model": "gpt-image-2",
+    "prompt": "Single retro JRPG enemy battle sprite on a 100% solid flat magenta background (#FF00FF). Inspired by Dragon Quest monster design language, but original and not copied.\n\nCharacter:\n- a mischievous blue slime fused with a tiny bronze knight helmet\n- expressive eyes\n- small spear\n- cute but still battle-capable\n\nStyle:\n- clean 16-bit pixel art\n- full body\n- readable at game scale\n- centered with generous magenta margin\n- background is ONLY solid flat magenta (#FF00FF)\n- no text, no UI, no frame\n\nPose:\n- enemy idle pose\n- facing slightly left\n- suitable for a battle loop showcase",
+    "size": "auto",
+    "quality": "auto",
+    "output_format": "png",
+    "response_format": "b64_json"
+  },
+  "extra_body": {
+    "group": "gpt-image-2"
+  },
+  "out": "C:\\buildgame\\nightday\\godotgame\\output\\showcase\\agent-sprite-forge\\battle\\enemy-slime-knight-raw.png",
+  "api_key_env": "AIARTMIRROR_API_KEY",
+  "model_env": "AIARTMIRROR_IMAGE_MODEL",
+  "group_env": "AIARTMIRROR_IMAGE_GROUP",
+  "result_count": 1
+}

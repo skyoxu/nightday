@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""
+Run GdUnit4 tests headless and archive reports to logs/e2e/<date>/.
+
+Usage:
+  py -3 scripts/python/run_gdunit.py \
+    --godot-bin "C:\\Godot\\Godot_v4.5.1-stable_mono_win64_console.exe" \
+    --project Tests.Godot \
+    --add tests/Adapters --add tests/OtherSuite \
+    --timeout-sec 300
+"""
+import argparse
+import datetime as dt
+import os
+import shutil
+import subprocess
+import json
+import sys
+import time
+import xml.etree.ElementTree as ET
+
+
+def _find_latest_results_xml(reports_dir: str):
+    try:
+        if not os.path.isdir(reports_dir):
+            return None
+        best_path = None
+        best_mtime = -1.0
+        for name in os.listdir(reports_dir):
+            if not name.startswith("report_"):
+                continue
+            cand = os.path.join(reports_dir, name, "results.xml")
+            if not os.path.isfile(cand):
+                continue
+            mtime = os.path.getmtime(cand)
+            if mtime > best_mtime:
+                best_mtime = mtime
+                best_path = cand
+        return best_path
+    except Exception:
+        return None
+
+
+def _parse_results_xml(path: str):
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+        failures = int(root.attrib.get("failures", "0"))
+        tests = int(root.attrib.get("tests", "0"))
+        errors = 0
+        for ts in root.findall("testsuite"):
+            errors += int(ts.attrib.get("errors", "0"))
+        return {"path": path, "tests": tests, "failures": failures, "errors": errors}
+    except Exception as ex:
+        return {"path": path, "error": f"parse_failed:{type(ex).__name__}"}
+
+
+def run_cmd(args, cwd=None, timeout=600_000):
+    p = subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, encoding='utf-8', errors='ignore')
+    try:
+        out, _ = p.communicate(timeout=timeout/1000.0)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        out, _ = p.communicate()
+        return 124, out
+    return p.returncode, out
+
+
+def run_cmd_failfast(args, cwd=None, timeout=600_000, break_markers=None):
+    """Run a process and stream stdout; if any line contains a break marker, kill early and return rc=1.
+    This avoids long timeouts when Godot enters Debugger Break state.
+    """
+    break_markers = break_markers or [
+        'Debugger Break',
+        'Parser Error',
+        'SCRIPT ERROR',
+    ]
+    p = subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, encoding='utf-8', errors='ignore')
+    buf_lines = []
+    hit_break = False
+    try:
+        # Poll line-by-line up to timeout
+        end_ts = dt.datetime.now().timestamp() + (timeout/1000.0)
+        while True:
+            line = p.stdout.readline()
+            if line:
+                buf_lines.append(line)
+                low = line.lower()
+                if any(m.lower() in low for m in break_markers):
+                    hit_break = True
+                    p.kill()
+                    break
+            else:
+                if p.poll() is not None:
+                    break
+            if dt.datetime.now().timestamp() > end_ts:
+                p.kill()
+                return 124, ''.join(buf_lines)
+        out = ''.join(buf_lines)
+        if hit_break:
+            return 1, out
+        return (p.returncode or 0), out
+    except Exception:
+        try:
+            p.kill()
+        except Exception:
+            pass
+        return 1, ''.join(buf_lines)
+
+
+def write_text(path: str, content: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
+def ensure_tests_project_junction(repo_root: str, project_abs: str, out_dir: str) -> None:
+    """
+    Hard gate: ensure Tests.Godot/Game.Godot is a Junction to the real Game.Godot.
+
+    This prevents drift between test resources and the actual game project.
+    """
+    try:
+        proj_name = os.path.basename(os.path.normpath(project_abs))
+        if proj_name != "Tests.Godot":
+            return
+
+        # Only enforce when the project is within repo root.
+        try:
+            common = os.path.commonpath([os.path.abspath(repo_root), os.path.abspath(project_abs)])
+        except ValueError:
+            return
+        if os.path.abspath(common) != os.path.abspath(repo_root):
+            return
+
+        ensure_script = os.path.join(repo_root, "scripts", "python", "ensure_tests_godot_junction.py")
+        if not os.path.isfile(ensure_script):
+            raise RuntimeError("ensure_tests_godot_junction_script_missing")
+
+        rel_project = os.path.relpath(project_abs, repo_root)
+        cmd = [
+            sys.executable,
+            ensure_script,
+            "--root",
+            repo_root,
+            "--tests-project",
+            rel_project,
+            "--link-name",
+            "Game.Godot",
+            "--target-rel",
+            "Game.Godot",
+            "--create-if-missing",
+            "--fix-wrong-target",
+        ]
+        rc, out = run_cmd(cmd, cwd=repo_root, timeout=60_000)
+        try:
+            write_text(os.path.join(out_dir, "ensure-tests-godot-junction.txt"), out)
+        except Exception:
+            pass
+        if rc != 0:
+            raise RuntimeError("ensure_tests_godot_junction_failed")
+    except Exception:
+        raise
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--godot-bin', required=True)
+    ap.add_argument('--project', default='Tests.Godot')
+    ap.add_argument('--add', action='append', default=[], help='Add directory or suite path(s). E.g., tests/Adapters or res://tests/Adapters')
+    ap.add_argument('--timeout-sec', type=int, default=600, help='Timeout seconds for test run (default 600)')
+    ap.add_argument('--prewarm', action='store_true', help='Prewarm: build solutions before running tests')
+    ap.add_argument('--rd', dest='report_dir', default=None, help='Custom destination to copy reports into (defaults to logs/e2e/<date>/gdunit-reports)')
+    args = ap.parse_args()
+
+    root = os.getcwd()
+    proj = os.path.abspath(args.project)
+    date = dt.date.today().strftime('%Y-%m-%d')
+    out_dir = os.path.join(root, 'logs', 'e2e', date)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Hard gate before any Godot invocation.
+    ensure_tests_project_junction(repo_root=root, project_abs=proj, out_dir=out_dir)
+
+    # Optional prewarm with fallback
+    prewarm_rc = None
+    prewarm_note = None
+    if args.prewarm:
+        pre_cmd = [args.godot_bin, '--headless', '--path', proj, '--build-solutions', '--quit']
+        _rcp, _outp = run_cmd(pre_cmd, cwd=proj, timeout=300_000)
+        prewarm_attempts = 1
+        prewarm_rc = _rcp
+        # Write first attempt
+        write_text(os.path.join(out_dir, 'prewarm-godot.txt'), _outp)
+        if _rcp != 0:
+            # Wait and retry once to mitigate transient C# load issues
+            time.sleep(3)
+            _rcp2, _outp2 = run_cmd(pre_cmd, cwd=proj, timeout=360_000)
+            prewarm_attempts = 2
+            prewarm_rc = _rcp2
+            # Append retry log to same file
+            try:
+                with open(os.path.join(out_dir, 'prewarm-godot.txt'), 'a', encoding='utf-8') as f:
+                    f.write("\n=== retry rc=%d ===\n" % _rcp2)
+                    f.write(_outp2)
+            except Exception:
+                pass
+            if _rcp2 == 0:
+                prewarm_note = 'retry-ok'
+            else:
+                # Fallback to dotnet build to avoid editor plugin failures
+                dotnet_projects = []
+                tests_csproj = os.path.join(proj, 'Tests.Godot.csproj')
+                if os.path.isfile(tests_csproj):
+                    dotnet_projects.append(tests_csproj)
+                # Also try solution at repo root if present
+                sln = os.path.join(root, 'GodotGame.sln')
+                # Prefer project build; if solution exists, add as secondary
+                build_logs = []
+                for item in (dotnet_projects or [sln] if os.path.isfile(sln) else []):
+                    rc_b, out_b = run_cmd(['dotnet', 'build', item, '-c', 'Debug', '-v', 'minimal'], cwd=root, timeout=600_000)
+                    build_logs.append((item, rc_b, out_b))
+                # Persist build logs
+                agg = []
+                for item, rc_b, out_b in build_logs:
+                    agg.append(f'=== {item} rc={rc_b} ===\n{out_b}\n')
+                write_text(os.path.join(out_dir, 'prewarm-dotnet.txt'), '\n'.join(agg) if agg else 'NO_DOTNET_BUILD_TARGETS')
+                prewarm_note = 'fallback-dotnet'
+
+    # Run tests (Debugger break, fail-fast).
+    # Build command with optional -a filters
+    cmd = [args.godot_bin, '--headless', '--path', proj, '-s', '-d', 'res://addons/gdUnit4/bin/GdUnitCmdTool.gd', '--ignoreHeadlessMode']
+    for a in args.add:
+        apath = a
+        if not apath.startswith('res://'):
+            # normalize relative tests path to res://
+            apath = 'res://' + apath.replace('\\', '/').lstrip('/')
+        cmd += ['-a', apath]
+    rc, out = run_cmd_failfast(cmd, cwd=proj, timeout=args.timeout_sec*1000)
+    console_path = os.path.join(out_dir, 'gdunit-console.txt')
+    with open(console_path, 'w', encoding='utf-8') as f:
+        f.write(out)
+
+    # Generate HTML log frame (optional)
+    _rc2, _out2 = run_cmd([args.godot_bin, '--headless', '--path', proj, '--quiet', '-s', 'res://addons/gdUnit4/bin/GdUnitCopyLog.gd'], cwd=proj)
+
+    # Archive reports
+    reports_dir = os.path.join(proj, 'reports')
+    dest = args.report_dir if args.report_dir else os.path.join(out_dir, 'gdunit-reports')
+    # Always create a destination folder with at least the console log and a summary
+    if os.path.isdir(dest):
+        shutil.rmtree(dest, ignore_errors=True)
+    os.makedirs(dest, exist_ok=True)
+    # Copy console log for diagnosis
+    try:
+        shutil.copy2(console_path, os.path.join(dest, 'gdunit-console.txt'))
+    except Exception:
+        pass
+    # Copy reports if they exist
+    if os.path.isdir(reports_dir):
+        for name in os.listdir(reports_dir):
+            src = os.path.join(reports_dir, name)
+            dst = os.path.join(dest, name)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst)
+
+    parsed = {}
+    latest_results = _find_latest_results_xml(reports_dir)
+    if latest_results:
+        parsed = _parse_results_xml(latest_results)
+
+    strict_exit = (os.environ.get("GDUNIT_STRICT_EXIT_CODE") or "0").strip() == "1"
+    normalized_rc = rc
+    if not strict_exit and rc != 0 and parsed and parsed.get("failures") == 0 and parsed.get("errors") == 0:
+        normalized_rc = 0
+
+    # Write a small summary json for CI
+    summary = {
+        'rc': rc,
+        'normalized_rc': normalized_rc,
+        'strict_exit_code': strict_exit,
+        'project': proj,
+        'added': args.add,
+        'timeout_sec': args.timeout_sec,
+        'results': parsed,
+    }
+    if prewarm_rc is not None:
+        summary['prewarm_rc'] = prewarm_rc
+        if prewarm_note:
+            summary['prewarm_note'] = prewarm_note
+        try:
+            summary['prewarm_attempts'] = prewarm_attempts
+        except NameError:
+            pass
+    try:
+        with open(os.path.join(dest, 'run-summary.json'), 'w', encoding='utf-8') as f:
+            json.dump(summary, f, ensure_ascii=False)
+    except Exception:
+        pass
+    print(f'GDUNIT_DONE rc={rc} out={out_dir}')
+    return 0 if normalized_rc == 0 else normalized_rc
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -1,0 +1,19 @@
+{
+  "base_url": "https://www.aiartmirror.com/v1",
+  "request": {
+    "model": "gpt-image-2",
+    "prompt": "Top-down retro JRPG overworld map designed for a Godot TileMap showcase, slightly closer to Dragon Quest than Final Fantasy. Pixel-art look, bright but grounded classic JRPG palette, readable tile-friendly terrain shapes, clean hand-authored map feel, no UI, no text, no labels.\n\nShow a cohesive overworld with:\n- a central road network\n- continuous mountain ranges, not isolated rocks\n- a connected blue river with natural banks\n- forests, grassland, and a small lake\n- one large castle town\n- one small village\n- one hero visible on the map\n- two treasure chests placed on reachable land\n\nCamera is straight top-down with slight 16-bit JRPG stylization. Keep the map readable for gameplay blockout and later tile extraction. Avoid noisy texture, avoid painterly blur, avoid modern realism. Favor classic Dragon Quest overworld readability and charm.",
+    "size": "auto",
+    "quality": "auto",
+    "output_format": "png",
+    "response_format": "b64_json"
+  },
+  "extra_body": {
+    "group": "gpt-image-2"
+  },
+  "out": "C:\\buildgame\\nightday\\godotgame\\output\\showcase\\agent-sprite-forge\\map\\editable-rpg-map-godot-tilemap.png",
+  "api_key_env": "AIARTMIRROR_API_KEY",
+  "model_env": "AIARTMIRROR_IMAGE_MODEL",
+  "group_env": "AIARTMIRROR_IMAGE_GROUP",
+  "result_count": 1
+}

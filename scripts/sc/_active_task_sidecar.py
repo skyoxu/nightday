@@ -1,0 +1,917 @@
+from __future__ import annotations
+
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from _pipeline_helpers import derive_pipeline_run_type
+from _pipeline_history import collect_recent_failure_summary
+from _util import repo_root, write_json, write_text
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT / "scripts" / "python") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "python"))
+
+from _chapter6_recovery_common import (
+    candidate_commands as _shared_candidate_commands,
+    chapter6_stop_loss_note as _chapter6_stop_loss_note,
+    extract_bottleneck_fields as _extract_bottleneck_fields,
+    format_metric_map as _format_metric_map,
+    forbidden_commands as _shared_forbidden_commands,
+    recommended_command as _shared_recommended_command,
+)
+from _sidecar_schema import validate_active_task_payload
+
+
+def active_task_dir(root: Path | None = None) -> Path:
+    base = root.resolve() if root else repo_root()
+    return base / "logs" / "ci" / "active-tasks"
+
+
+def active_task_json_path(task_id: str, root: Path | None = None) -> Path:
+    return active_task_dir(root) / f"task-{str(task_id).strip()}.active.json"
+
+
+def active_task_md_path(task_id: str, root: Path | None = None) -> Path:
+    return active_task_dir(root) / f"task-{str(task_id).strip()}.active.md"
+
+
+def _repo_rel(path: Path, *, root: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return str(path.resolve()).replace("\\", "/")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else {}
+
+
+def _load_jsonl_soft(path: Path | None) -> list[dict[str, Any]]:
+    if path is None or not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        text = str(line or "").strip()
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def _event_family(event: dict[str, Any]) -> str:
+    explicit = str(event.get("event_family") or "").strip().lower()
+    if explicit:
+        return explicit
+    name = str(event.get("event") or "").strip().lower().replace("-", "_")
+    if name.startswith("reviewer_") or name.startswith("agent_review_") or name.startswith("llm_review_"):
+        return "reviewer"
+    if name.startswith("sidecar_") or name.startswith("harness_"):
+        return "sidecar"
+    if name.startswith("approval_"):
+        return "approval"
+    if name.startswith("run_"):
+        return "run"
+    if name.startswith("step_"):
+        return "step"
+    return "custom"
+
+
+def _summarize_run_events(run_events_path: Path | None) -> dict[str, Any]:
+    events = _load_jsonl_soft(run_events_path)
+    if not events:
+        return {}
+    normalized: list[dict[str, Any]] = []
+    for item in events:
+        payload = dict(item)
+        payload["event_family"] = _event_family(payload)
+        normalized.append(payload)
+    latest_event = normalized[-1]
+    latest_turn_seq = max(int(item.get("turn_seq") or 1) for item in normalized)
+    latest_turn_events = [item for item in normalized if int(item.get("turn_seq") or 1) == latest_turn_seq]
+    family_counts: dict[str, int] = {}
+    latest_turn_family_counts: dict[str, int] = {}
+    reviewers: list[str] = []
+    sidecars: list[str] = []
+    approval_text = ""
+    for item in normalized:
+        family = str(item.get("event_family") or "").strip()
+        if family:
+            family_counts[family] = family_counts.get(family, 0) + 1
+    for item in latest_turn_events:
+        family = str(item.get("event_family") or "").strip()
+        if family:
+            latest_turn_family_counts[family] = latest_turn_family_counts.get(family, 0) + 1
+        details = item.get("details") if isinstance(item.get("details"), dict) else {}
+        if family == "reviewer":
+            reviewers.append(
+                f"{str(item.get('item_id') or details.get('reviewer') or 'unknown')}:{str(item.get('status') or 'n/a')}/{str(item.get('event') or 'n/a')}"
+            )
+        elif family == "sidecar":
+            sidecars.append(
+                f"{str(item.get('item_id') or details.get('sidecar') or 'unknown')}:{str(item.get('status') or 'n/a')}/{str(item.get('event') or 'n/a')}"
+            )
+        elif family == "approval":
+            approval_text = (
+                f"{str(item.get('status') or 'n/a')}/{str(item.get('event') or 'n/a')} "
+                f"action={str(details.get('action') or 'n/a')} "
+                f"request_id={str(details.get('request_id') or item.get('item_id') or 'n/a')} "
+                f"transition={str(details.get('transition') or 'n/a')}"
+            )
+    previous_turn_events: list[dict[str, Any]] = []
+    previous_turn_seq = 0
+    if latest_turn_seq > 1:
+        prior_turns = sorted(
+            {int(item.get("turn_seq") or 1) for item in normalized if int(item.get("turn_seq") or 1) < latest_turn_seq}
+        )
+        if prior_turns:
+            previous_turn_seq = prior_turns[-1]
+            previous_turn_events = [item for item in normalized if int(item.get("turn_seq") or 1) == previous_turn_seq]
+    previous_turn_id = str(previous_turn_events[-1].get("turn_id") or "").strip() if previous_turn_events else ""
+    previous_turn_family_counts: dict[str, int] = {}
+    previous_reviewers = {
+        str(item.get("item_id") or ((item.get("details") or {}) if isinstance(item.get("details"), dict) else {}).get("reviewer") or "").strip()
+        for item in previous_turn_events
+        if str(item.get("event_family") or "").strip() == "reviewer"
+    }
+    previous_sidecars = {
+        str(item.get("item_id") or ((item.get("details") or {}) if isinstance(item.get("details"), dict) else {}).get("sidecar") or "").strip()
+        for item in previous_turn_events
+        if str(item.get("event_family") or "").strip() == "sidecar"
+    }
+    previous_approval_text = ""
+    for item in previous_turn_events:
+        family = str(item.get("event_family") or "").strip()
+        if family:
+            previous_turn_family_counts[family] = previous_turn_family_counts.get(family, 0) + 1
+        if family == "approval":
+            details = item.get("details") if isinstance(item.get("details"), dict) else {}
+            previous_approval_text = (
+                f"{str(item.get('status') or 'n/a')}/{str(item.get('event') or 'n/a')} "
+                f"action={str(details.get('action') or 'n/a')} "
+                f"request_id={str(details.get('request_id') or item.get('item_id') or 'n/a')} "
+                f"transition={str(details.get('transition') or 'n/a')}"
+            )
+    latest_reviewers = {
+        str(item.get("item_id") or ((item.get("details") or {}) if isinstance(item.get("details"), dict) else {}).get("reviewer") or "").strip()
+        for item in latest_turn_events
+        if str(item.get("event_family") or "").strip() == "reviewer"
+    }
+    latest_sidecars = {
+        str(item.get("item_id") or ((item.get("details") or {}) if isinstance(item.get("details"), dict) else {}).get("sidecar") or "").strip()
+        for item in latest_turn_events
+        if str(item.get("event_family") or "").strip() == "sidecar"
+    }
+    family_delta: dict[str, int] = {}
+    for family in sorted(set(previous_turn_family_counts) | set(latest_turn_family_counts)):
+        delta = int(latest_turn_family_counts.get(family, 0)) - int(previous_turn_family_counts.get(family, 0))
+        if delta:
+            family_delta[family] = delta
+    latest_turn_id = str((latest_turn_events[-1] if latest_turn_events else latest_event).get("turn_id") or "").strip()
+    return {
+        "path": str(run_events_path).replace("\\", "/") if run_events_path is not None else "",
+        "event_count": len(normalized),
+        "turn_count": len({str(item.get("turn_id") or "").strip() for item in normalized if str(item.get("turn_id") or "").strip()}),
+        "latest_turn_id": latest_turn_id,
+        "latest_turn_seq": latest_turn_seq,
+        "latest_event": str(latest_event.get("event") or "").strip(),
+        "family_counts": family_counts,
+        "latest_turn_family_counts": latest_turn_family_counts,
+        "previous_turn_id": previous_turn_id,
+        "previous_turn_seq": previous_turn_seq,
+        "previous_turn_family_counts": previous_turn_family_counts,
+        "turn_family_delta": family_delta,
+        "new_reviewers": sorted(item for item in latest_reviewers if item and item not in previous_reviewers),
+        "new_sidecars": sorted(item for item in latest_sidecars if item and item not in previous_sidecars),
+        "approval_changed": bool(approval_text != previous_approval_text),
+        "previous_approval": previous_approval_text,
+        "reviewers": reviewers,
+        "sidecars": sidecars,
+        "approval": approval_text,
+    }
+
+
+def _normalize_llm_verdict(value: str | None) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"ok", "pass", "passed"}:
+        return "OK"
+    if raw in {"needs fix", "needs_fix", "need fix", "fail", "failed"}:
+        return "Needs Fix"
+    return "Unknown"
+
+
+def _resolve_path(raw: str, *, root: Path) -> Path | None:
+    raw_text = str(raw or "").strip()
+    if not raw_text:
+        return None
+    candidate = Path(raw_text)
+    if not candidate.is_absolute():
+        candidate = (root / candidate).resolve()
+    return candidate if candidate.exists() else None
+
+
+def _resolve_latest_out_dir(latest_payload: dict[str, Any], *, root: Path) -> Path | None:
+    if not isinstance(latest_payload, dict):
+        return None
+    direct = _resolve_path(str(latest_payload.get("latest_out_dir") or "").strip(), root=root)
+    if direct is not None:
+        return direct
+    summary_path = _resolve_path(str(latest_payload.get("summary_path") or "").strip(), root=root)
+    if summary_path is not None:
+        return summary_path.parent
+    execution_context_path = _resolve_path(str(latest_payload.get("execution_context_path") or "").strip(), root=root)
+    if execution_context_path is not None:
+        return execution_context_path.parent
+    return None
+
+
+def _infer_root_from_paths(*, latest_json_path: Path, out_dir: Path) -> Path:
+    candidates = [latest_json_path.resolve(), out_dir.resolve()]
+    for candidate in candidates:
+        parts_lower = [part.lower() for part in candidate.parts]
+        for idx in range(len(parts_lower) - 1):
+            if parts_lower[idx] == "logs" and parts_lower[idx + 1] == "ci":
+                return Path(*candidate.parts[:idx]).resolve()
+    latest_parent = latest_json_path.resolve().parent
+    if latest_parent.name.startswith("sc-review-pipeline-task-"):
+        return latest_parent.parent.resolve()
+    out_name = out_dir.resolve().name
+    if out_name.startswith("sc-review-pipeline-task-"):
+        return out_dir.resolve().parent.resolve()
+    return repo_root()
+
+
+def _normalize_pipeline_summary(
+    *,
+    summary: dict[str, Any],
+    latest_payload: dict[str, Any],
+    effective_status: str,
+    run_events_path: Path | None,
+    run_id: str,
+) -> dict[str, Any]:
+    normalized = dict(summary)
+    normalized_status = str(normalized.get("status") or effective_status or latest_payload.get("status") or "").strip().lower()
+    if not str(normalized.get("run_type") or "").strip():
+        normalized["run_type"] = derive_pipeline_run_type(normalized)
+    run_type = str(normalized.get("run_type") or "").strip().lower()
+    has_run_completed = _has_run_completed_event(run_events_path=run_events_path, run_id=run_id)
+    current_reason = str(normalized.get("reason") or "").strip().lower()
+    if run_type == "planned-only" and has_run_completed and current_reason in {"", "in_progress", "dry_run", "dry-run", "pipeline_clean"}:
+        normalized["reason"] = "planned_only_incomplete"
+    if not str(normalized.get("started_at_utc") or "").strip():
+        normalized["started_at_utc"] = str(latest_payload.get("started_at_utc") or "").strip() or "unknown"
+    if not str(normalized.get("finished_at_utc") or "").strip():
+        normalized["finished_at_utc"] = str(latest_payload.get("finished_at_utc") or "").strip()
+    if not str(normalized.get("reuse_mode") or "").strip():
+        normalized["reuse_mode"] = str(latest_payload.get("reuse_mode") or "").strip().lower() or "none"
+    if not str(normalized.get("reason") or "").strip():
+        latest_reason = str(latest_payload.get("reason") or "").strip()
+        if latest_reason:
+            normalized["reason"] = latest_reason
+            return normalized
+        if normalized_status == "aborted":
+            normalized["reason"] = "aborted"
+        elif normalized_status == "running":
+            normalized["reason"] = "in_progress"
+        elif normalized_status == "fail":
+            normalized["reason"] = "step_failed"
+        else:
+            normalized["reason"] = "pipeline_clean"
+    return normalized
+
+
+def _derive_step_summary(summary: dict[str, Any]) -> dict[str, str]:
+    steps = summary.get("steps")
+    if not isinstance(steps, list):
+        return {"latest_step": "", "latest_step_status": "", "failed_step": "", "last_completed_step": ""}
+    latest_step = ""
+    latest_step_status = ""
+    failed_step = ""
+    last_completed = ""
+    for item in steps:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        status = str(item.get("status") or "").strip()
+        if name:
+            latest_step = name
+            latest_step_status = status
+        if not failed_step and status == "fail":
+            failed_step = name
+        if status == "ok":
+            last_completed = name
+    return {
+        "latest_step": latest_step,
+        "latest_step_status": latest_step_status,
+        "failed_step": failed_step,
+        "last_completed_step": last_completed,
+    }
+
+
+def _derive_clean_state(*, summary: dict[str, Any], out_dir: Path, root: Path) -> dict[str, Any]:
+    steps = summary.get("steps") if isinstance(summary.get("steps"), list) else []
+    run_type = str(summary.get("run_type") or "").strip().lower()
+    step_map = {
+        str(item.get("name") or "").strip(): item
+        for item in steps
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    }
+    test_status = str((step_map.get("sc-test") or {}).get("status") or "").strip().lower()
+    acceptance_status = str((step_map.get("sc-acceptance-check") or {}).get("status") or "").strip().lower()
+    llm_step = step_map.get("sc-llm-review") or {}
+    llm_status = str(llm_step.get("status") or "").strip().lower()
+    llm_summary_path = _resolve_path(str(llm_step.get("summary_file") or "").strip(), root=root)
+    needs_fix_agents: list[str] = []
+    unknown_agents: list[str] = []
+    timeout_agents: list[str] = []
+    if llm_summary_path is not None:
+        payload = _read_json(llm_summary_path)
+        results = payload.get("results") if isinstance(payload.get("results"), list) else []
+        for row in results:
+            if not isinstance(row, dict):
+                continue
+            agent = str(row.get("agent") or "").strip()
+            verdict = _normalize_llm_verdict(str(((row.get("details") or {}) if isinstance(row.get("details"), dict) else {}).get("verdict") or ""))
+            rc = int(row.get("rc") or 0)
+            status = str(row.get("status") or "").strip().lower()
+            if verdict == "Needs Fix" and agent:
+                needs_fix_agents.append(agent)
+            if (verdict == "Unknown" or status not in {"ok", "skipped"} or rc != 0) and agent:
+                unknown_agents.append(agent)
+            if rc == 124 and agent:
+                timeout_agents.append(agent)
+    deterministic_ok = test_status == "ok" and acceptance_status == "ok"
+    llm_clean = llm_status == "ok" and not needs_fix_agents and not unknown_agents
+    if deterministic_ok and llm_clean:
+        state = "clean"
+    elif deterministic_ok and (needs_fix_agents or unknown_agents or llm_status == "fail"):
+        state = "deterministic_ok_llm_not_clean"
+    elif deterministic_ok and llm_status == "skipped":
+        state = "deterministic_only"
+    else:
+        state = "not_clean"
+    if run_type == "planned-only" and str(summary.get("finished_at_utc") or "").strip():
+        state = "not_clean"
+    return {
+        "state": state,
+        "run_type": run_type,
+        "deterministic_ok": deterministic_ok,
+        "llm_status": llm_status,
+        "llm_summary_path": _repo_rel(llm_summary_path, root=root) if llm_summary_path else "",
+        "needs_fix_agents": sorted(needs_fix_agents),
+        "unknown_agents": sorted(set(unknown_agents)),
+        "timeout_agents": sorted(set(timeout_agents)),
+    }
+
+
+def _derive_waste_signals(*, summary: dict[str, Any], root: Path) -> dict[str, bool]:
+    steps = summary.get("steps") if isinstance(summary.get("steps"), list) else []
+    step_map = {
+        str(item.get("name") or "").strip(): item
+        for item in steps
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    }
+    sc_test_step = step_map.get("sc-test") or {}
+    sc_test_summary_path = _resolve_path(str(sc_test_step.get("summary_file") or "").strip(), root=root)
+    signal = False
+    if sc_test_summary_path is not None:
+        payload = _read_json(sc_test_summary_path)
+        sc_steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
+        sc_step_map = {
+            str(item.get("name") or "").strip(): item
+            for item in sc_steps
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        }
+        unit_status = str((sc_step_map.get("unit") or {}).get("status") or "").strip().lower()
+        engine_ran = any(
+            str((sc_step_map.get(name) or {}).get("status") or "").strip().lower() in {"ok", "fail"}
+            for name in ("gdunit-hard", "smoke")
+        )
+        signal = unit_status == "fail" and engine_ran
+    return {
+        "unit_failed_but_engine_lane_ran": signal,
+    }
+
+
+def _signal_driven_recommendation(
+    *,
+    diagnostics: dict[str, Any],
+    failed_step: str,
+    clean_state: dict[str, Any],
+) -> tuple[str, str, str] | None:
+    rerun_guard = diagnostics.get("rerun_guard") if isinstance(diagnostics.get("rerun_guard"), dict) else {}
+    if bool(rerun_guard.get("blocked")):
+        kind = str(rerun_guard.get("kind") or "").strip()
+        if kind == "deterministic_green_llm_not_clean":
+            return (
+                "needs-fix-fast",
+                "Rerun guard blocked another full 6.7 because deterministic steps are already green; continue with the narrow llm-only closure path.",
+                "rerun_guard",
+            )
+        if kind == "repeat_review_needs_fix":
+            return (
+                "needs-fix-fast",
+                "Rerun guard blocked another reviewer-only rerun because recent runs already repeat the same Needs Fix family; continue with needs-fix-fast or record the remaining findings instead of reopening 6.7.",
+                "rerun_guard",
+            )
+        if kind == "repeat_deterministic_failure":
+            return (
+                "inspect",
+                "Rerun guard blocked another full rerun after repeated deterministic failures; inspect the repeated sc-test fingerprint and fix the root cause first.",
+                "rerun_guard",
+            )
+        if kind in {"dirty_worktree_unsafe_paths_ceiling", "dirty_worktree_changed_paths_ceiling", "profile_drift_change_scope_ceiling"}:
+            return (
+                "inspect",
+                "Rerun guard blocked another full rerun because the current changes exceed the standard Chapter 6 safe scope; shrink the dirty worktree or inspect/reset the drift first.",
+                "rerun_guard",
+            )
+
+    llm_retry_stop_loss = diagnostics.get("llm_retry_stop_loss") if isinstance(diagnostics.get("llm_retry_stop_loss"), dict) else {}
+    if bool(llm_retry_stop_loss.get("blocked")):
+        return (
+            "needs-fix-fast",
+            "Deterministic steps are already green and the pipeline stopped after the first llm timeout; continue with targeted llm closure instead of paying for another full run.",
+            "llm_retry_stop_loss",
+        )
+
+    sc_test_retry_stop_loss = diagnostics.get("sc_test_retry_stop_loss") if isinstance(diagnostics.get("sc_test_retry_stop_loss"), dict) else {}
+    if bool(sc_test_retry_stop_loss.get("blocked")) and str(failed_step or "").strip() == "sc-test":
+        return (
+            "rerun",
+            "The pipeline stopped the same-run sc-test retry after a known unit failure; fix the unit root cause first, then start a fresh run instead of paying for another identical retry.",
+            "sc_test_retry_stop_loss",
+        )
+
+    waste_signals = diagnostics.get("waste_signals") if isinstance(diagnostics.get("waste_signals"), dict) else {}
+    if bool(waste_signals.get("unit_failed_but_engine_lane_ran")) and str(failed_step or "").strip() == "sc-test":
+        return (
+            "resume",
+            "Unit failure was already known before engine lane work continued; fix the unit failure first and resume only after that to avoid paying the same engine-lane cost again.",
+            "waste_signals",
+        )
+    recent_failure_summary = diagnostics.get("recent_failure_summary") if isinstance(diagnostics.get("recent_failure_summary"), dict) else {}
+    if bool(recent_failure_summary.get("stop_full_rerun_recommended")):
+        return (
+            "inspect",
+            "Recent failed runs already repeat the same failure family; inspect the repeated fingerprint and fix the root cause before paying for another full rerun.",
+            "recent_failure_summary",
+        )
+    return None
+
+
+def _recommended_action(*, status: str, failed_step: str, repair_guide: dict[str, Any], clean_state: dict[str, Any]) -> tuple[str, str]:
+    normalized = str(status or "").strip().lower()
+    derived_state = str(clean_state.get("state") or "").strip().lower()
+    repair_status = str(repair_guide.get("status") or "").strip().lower()
+    first_fix_title = ""
+    recommendations = repair_guide.get("recommendations")
+    if isinstance(recommendations, list):
+        for item in recommendations:
+            if isinstance(item, dict):
+                first_fix_title = str(item.get("title") or "").strip()
+                if first_fix_title:
+                    break
+    if derived_state == "deterministic_ok_llm_not_clean":
+        if clean_state.get("timeout_agents") or clean_state.get("unknown_agents"):
+            return "needs-fix-fast", "Deterministic steps are already green, but llm_review is incomplete; rerun only the LLM closure path instead of paying for a full pipeline."
+        return "needs-fix-fast", "Deterministic steps are already green, but llm_review still reports actionable findings; continue with the task-scoped Needs Fix loop."
+    if normalized == "aborted":
+        return "rerun", "The latest run was aborted; start a fresh run instead of resuming frozen artifacts."
+    if repair_status == "needs-approval":
+        return "fork", "Repair guidance requires approval or isolation; prefer fork after reviewing the approval sidecar."
+    if repair_status == "needs-fix":
+        why = "Repair guidance still reports actionable follow-up; inspect the repair guide and close the remaining findings before continuing."
+        if first_fix_title:
+            why += f" Suggested first fix: {first_fix_title}."
+        return "inspect", why
+    if normalized == "ok":
+        return "continue", "Pipeline is green; continue the task or start the next task."
+    if failed_step:
+        why = f"Fix the first blocking step `{failed_step}` and resume the same run."
+        if first_fix_title:
+            why += f" Suggested first fix: {first_fix_title}."
+        return "resume", why
+    return "inspect", "Inspect summary, execution-context, and repair-guide before choosing resume or fork."
+
+
+def _chapter6_rerun_policy(*, blocked_by: str, diagnostics: dict[str, Any]) -> tuple[bool, str]:
+    blocked = str(blocked_by or "").strip().lower()
+    rerun_guard = diagnostics.get("rerun_guard") if isinstance(diagnostics.get("rerun_guard"), dict) else {}
+    guard_kind = str(rerun_guard.get("kind") or "").strip()
+    if blocked == "rerun_guard":
+        if guard_kind == "repeat_deterministic_failure":
+            return True, "--allow-repeat-deterministic-failures"
+        if guard_kind in {"dirty_worktree_unsafe_paths_ceiling", "dirty_worktree_changed_paths_ceiling", "profile_drift_change_scope_ceiling"}:
+            return True, "--allow-large-change-scope-rerun"
+        return True, "--allow-full-rerun"
+    if blocked in {"llm_retry_stop_loss", "sc_test_retry_stop_loss", "waste_signals", "recent_failure_summary"}:
+        return True, ""
+    return False, ""
+
+
+def _candidate_commands(*, task_id: str, latest_json_rel: str) -> dict[str, str]:
+    commands = dict(_shared_candidate_commands(str(task_id or "").strip(), str(latest_json_rel or "").strip()))
+    normalized_task_id = str(task_id or "").strip()
+    commands["resume_summary"] = ""
+    if normalized_task_id:
+        commands["resume_summary"] = f"py -3 scripts/python/dev_cli.py resume-task --task-id {normalized_task_id}"
+    return commands
+
+
+def _recommended_command(
+    recommended_action: str,
+    commands: dict[str, str],
+    chapter6_hints: dict[str, Any],
+    approval: dict[str, Any] | None = None,
+) -> str:
+    action = str(chapter6_hints.get("next_action") or "").strip().lower().replace("_", "-") or str(recommended_action or "").strip().lower().replace("_", "-")
+    if action in {"inspect", "continue"}:
+        return str(commands.get("resume_summary") or commands.get("inspect") or "").strip()
+    return _shared_recommended_command(recommended_action, commands, chapter6_hints, approval)
+
+
+def _forbidden_commands(
+    *,
+    recommended_action: str,
+    commands: dict[str, str],
+    chapter6_hints: dict[str, Any],
+    approval: dict[str, Any] | None = None,
+) -> list[str]:
+    return _shared_forbidden_commands(
+        recommended_action=recommended_action,
+        commands=commands,
+        chapter6_hints=chapter6_hints,
+        approval=approval,
+    )
+
+
+
+
+def _derive_latest_summary_signals(
+    *,
+    status: str,
+    failed_step: str,
+    summary: dict[str, Any],
+    latest_payload: dict[str, Any],
+    diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    normalized_status = str(status or "").strip().lower() or str(summary.get("status") or "").strip().lower()
+    reason = str(summary.get("reason") or latest_payload.get("reason") or "").strip()
+    if not reason:
+        if normalized_status == "aborted":
+            reason = "aborted"
+        elif normalized_status == "running":
+            reason = "in_progress"
+        elif normalized_status == "fail":
+            reason = f"step_failed:{failed_step}" if failed_step else "pipeline_failed"
+        else:
+            reason = "pipeline_clean"
+    reuse_mode = str(summary.get("reuse_mode") or latest_payload.get("reuse_mode") or "").strip().lower() or "none"
+    artifact_integrity = diagnostics.get("artifact_integrity") if isinstance(diagnostics.get("artifact_integrity"), dict) else {}
+    return {
+        "reason": reason,
+        "run_type": str(summary.get("run_type") or latest_payload.get("run_type") or "").strip(),
+        "reuse_mode": reuse_mode,
+        "artifact_integrity_kind": str(artifact_integrity.get("kind") or "").strip(),
+        "diagnostics_keys": sorted(str(key).strip() for key in diagnostics.keys() if str(key).strip()),
+    }
+
+
+def _has_run_completed_event(*, run_events_path: Path | None, run_id: str) -> bool:
+    for payload in _load_jsonl_soft(run_events_path):
+        if str(payload.get("event") or "").strip() != "run_completed":
+            continue
+        event_run_id = str(payload.get("run_id") or "").strip()
+        if event_run_id and run_id and event_run_id != run_id:
+            continue
+        return True
+    return False
+
+
+def build_active_task_payload(
+    *,
+    task_id: str,
+    run_id: str,
+    status: str,
+    out_dir: Path,
+    latest_json_path: Path,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    resolved_root = root.resolve() if root else repo_root()
+    latest_payload = _read_json(latest_json_path)
+    effective_out_dir = _resolve_latest_out_dir(latest_payload, root=resolved_root) or out_dir
+    effective_run_id = str(latest_payload.get("run_id") or run_id).strip() if effective_out_dir != out_dir else str(run_id).strip()
+    effective_status = str(latest_payload.get("status") or status).strip() if effective_out_dir != out_dir else str(status).strip()
+    summary_path = effective_out_dir / "summary.json"
+    execution_context_path = effective_out_dir / "execution-context.json"
+    repair_guide_json_path = effective_out_dir / "repair-guide.json"
+    repair_guide_md_path = effective_out_dir / "repair-guide.md"
+    run_events_path = _resolve_path(str(latest_payload.get("run_events_path") or "").strip(), root=resolved_root) or (effective_out_dir / "run-events.jsonl")
+    summary = _read_json(summary_path)
+    summary = _normalize_pipeline_summary(
+        summary=summary,
+        latest_payload=latest_payload,
+        effective_status=effective_status,
+        run_events_path=run_events_path,
+        run_id=effective_run_id,
+    )
+    repair_guide = _read_json(repair_guide_json_path)
+    execution_context = _read_json(execution_context_path)
+    step_summary = _derive_step_summary(summary)
+    clean_state = _derive_clean_state(summary=summary, out_dir=out_dir, root=resolved_root)
+    diagnostics = dict(execution_context.get("diagnostics") or {}) if isinstance(execution_context.get("diagnostics"), dict) else {}
+    recent_failure_summary = collect_recent_failure_summary(
+        task_id=str(task_id).strip(),
+        delivery_profile=str(execution_context.get("delivery_profile") or "").strip(),
+        security_profile=str(execution_context.get("security_profile") or "").strip(),
+        root=resolved_root,
+        limit=3,
+    )
+    if recent_failure_summary:
+        diagnostics["recent_failure_summary"] = recent_failure_summary
+    waste_signals = _derive_waste_signals(summary=summary, root=resolved_root)
+    if any(bool(value) for value in waste_signals.values()):
+        diagnostics["waste_signals"] = waste_signals
+    summary_status = str(summary.get("status") or effective_status).strip().lower()
+    summary_reason = str(summary.get("reason") or "").strip().lower()
+    has_run_completed = _has_run_completed_event(run_events_path=run_events_path, run_id=effective_run_id)
+    artifact_integrity: dict[str, Any] | None = None
+    if str(summary.get("run_type") or "").strip().lower() == "planned-only" and (
+        str(summary.get("finished_at_utc") or "").strip() or has_run_completed
+    ):
+        artifact_integrity = {
+            "kind": "planned_only_incomplete",
+            "blocked": True,
+        }
+    if summary_status in {"ok", "fail", "aborted"} and not summary_reason.startswith("rerun_blocked:"):
+        if run_events_path is None or not run_events_path.exists():
+            artifact_integrity = {
+                "kind": "artifact_missing",
+                "blocked": True,
+            }
+        elif not has_run_completed:
+            artifact_integrity = {
+                "kind": "artifact_incomplete",
+                "blocked": True,
+            }
+    if artifact_integrity is not None:
+        diagnostics["artifact_integrity"] = artifact_integrity
+    signal_recommendation = _signal_driven_recommendation(
+        diagnostics=diagnostics,
+        failed_step=step_summary["failed_step"],
+        clean_state=clean_state,
+    )
+    blocked_by = ""
+    if artifact_integrity is not None:
+        recommended_action = "rerun"
+        recommended_why = "Latest recovery bundle is missing a completed producer run; inspect the stale artifacts only for evidence, then start a fresh real run."
+        blocked_by = "artifact_integrity"
+    elif signal_recommendation is not None:
+        recommended_action, recommended_why, blocked_by = signal_recommendation
+    else:
+        recommended_action, recommended_why = _recommended_action(
+            status=status,
+            failed_step=step_summary["failed_step"],
+            repair_guide=repair_guide,
+            clean_state=clean_state,
+        )
+        if recommended_action == "needs-fix-fast":
+            blocked_by = "rerun_guard"
+        elif step_summary["failed_step"]:
+            blocked_by = "deterministic_failure"
+    latest_summary_signals = _derive_latest_summary_signals(
+        status=status,
+        failed_step=step_summary["failed_step"],
+        summary=summary,
+        latest_payload=latest_payload,
+        diagnostics=diagnostics,
+    )
+    rerun_forbidden, rerun_override_flag = _chapter6_rerun_policy(blocked_by=blocked_by, diagnostics=diagnostics)
+    chapter6_hints = {
+        "next_action": recommended_action,
+        "can_skip_6_7": recommended_action in {"continue", "needs-fix-fast"},
+        "can_go_to_6_8": recommended_action == "needs-fix-fast",
+        "blocked_by": blocked_by,
+        "rerun_forbidden": rerun_forbidden,
+        "rerun_override_flag": rerun_override_flag,
+    }
+    approval = execution_context.get("approval") if isinstance(execution_context.get("approval"), dict) else {}
+    run_event_summary = _summarize_run_events(run_events_path)
+    bottleneck_fields = _extract_bottleneck_fields(summary)
+    latest_json_rel = _repo_rel(latest_json_path, root=resolved_root)
+    candidate_commands = _candidate_commands(task_id=str(task_id).strip(), latest_json_rel=latest_json_rel)
+    recommended_command = _recommended_command(recommended_action, candidate_commands, chapter6_hints, approval)
+    forbidden_commands = _forbidden_commands(
+        recommended_action=recommended_action,
+        commands=candidate_commands,
+        chapter6_hints=chapter6_hints,
+        approval=approval,
+    )
+    return {
+        "cmd": "active-task-sidecar",
+        "task_id": str(task_id).strip(),
+        "run_id": effective_run_id,
+        "status": effective_status,
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "paths": {
+            "latest_json": latest_json_rel,
+            "out_dir": _repo_rel(effective_out_dir, root=resolved_root),
+            "summary_json": _repo_rel(summary_path, root=resolved_root),
+            "execution_context_json": _repo_rel(execution_context_path, root=resolved_root),
+            "repair_guide_json": _repo_rel(repair_guide_json_path, root=resolved_root),
+            "repair_guide_md": _repo_rel(repair_guide_md_path, root=resolved_root),
+        },
+        "step_summary": step_summary,
+        "clean_state": clean_state,
+        "diagnostics": diagnostics,
+        "latest_summary_signals": latest_summary_signals,
+        "chapter6_hints": chapter6_hints,
+        "recommended_action": recommended_action,
+        "recommended_action_why": recommended_why,
+        "candidate_commands": candidate_commands,
+        "recommended_command": recommended_command,
+        "forbidden_commands": forbidden_commands,
+        "repair_status": str(repair_guide.get("status") or "").strip(),
+        "agent_review_recommended_action": str(
+            ((execution_context.get("agent_review") or {}).get("recommended_action")) or ""
+        ).strip(),
+        "approval": approval,
+        "run_event_summary": run_event_summary,
+        **bottleneck_fields,
+    }
+
+
+def render_active_task_markdown(payload: dict[str, Any]) -> str:
+    paths = payload.get("paths") or {}
+    steps = payload.get("step_summary") or {}
+    commands = payload.get("candidate_commands") or {}
+    clean_state = payload.get("clean_state") or {}
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
+    profile_drift = diagnostics.get("profile_drift") if isinstance(diagnostics.get("profile_drift"), dict) else {}
+    waste_signals = diagnostics.get("waste_signals") if isinstance(diagnostics.get("waste_signals"), dict) else {}
+    rerun_guard = diagnostics.get("rerun_guard") if isinstance(diagnostics.get("rerun_guard"), dict) else {}
+    reuse_decision = diagnostics.get("reuse_decision") if isinstance(diagnostics.get("reuse_decision"), dict) else {}
+    llm_timeout_memory = diagnostics.get("llm_timeout_memory") if isinstance(diagnostics.get("llm_timeout_memory"), dict) else {}
+    llm_retry_stop_loss = diagnostics.get("llm_retry_stop_loss") if isinstance(diagnostics.get("llm_retry_stop_loss"), dict) else {}
+    approval = payload.get("approval") if isinstance(payload.get("approval"), dict) else {}
+    run_event_summary = payload.get("run_event_summary") if isinstance(payload.get("run_event_summary"), dict) else {}
+    latest_summary_signals = payload.get("latest_summary_signals") if isinstance(payload.get("latest_summary_signals"), dict) else {}
+    chapter6_hints = payload.get("chapter6_hints") if isinstance(payload.get("chapter6_hints"), dict) else {}
+    step_duration_totals = payload.get("step_duration_totals") if isinstance(payload.get("step_duration_totals"), dict) else {}
+    step_duration_avg = payload.get("step_duration_avg") if isinstance(payload.get("step_duration_avg"), dict) else {}
+    round_failure_kind_counts = payload.get("round_failure_kind_counts") if isinstance(payload.get("round_failure_kind_counts"), dict) else {}
+    chapter6_stop_loss_note = _chapter6_stop_loss_note(chapter6_hints, latest_summary_signals)
+    lines = [
+        "# Active Task Summary",
+        "",
+        f"- Task id: `{payload.get('task_id')}`",
+        f"- Run id: `{payload.get('run_id')}`",
+        f"- Status: {payload.get('status')}",
+        f"- Updated at UTC: {payload.get('updated_at_utc')}",
+        f"- Latest pointer: `{paths.get('latest_json')}`" if paths.get("latest_json") else "- Latest pointer: n/a",
+        f"- Pipeline out dir: `{paths.get('out_dir')}`" if paths.get("out_dir") else "- Pipeline out dir: n/a",
+        f"- Latest step: {steps.get('latest_step') or 'n/a'}",
+        f"- Latest step status: {steps.get('latest_step_status') or 'n/a'}",
+        f"- Failed step: {steps.get('failed_step') or 'none'}",
+        f"- Last completed step: {steps.get('last_completed_step') or 'none'}",
+        f"- Recommended action: {payload.get('recommended_action') or 'inspect'}",
+        f"- Recommended action why: {payload.get('recommended_action_why') or 'n/a'}",
+        f"- Clean state: {clean_state.get('state') or 'unknown'}",
+        f"- Deterministic ok: {clean_state.get('deterministic_ok')}",
+        f"- Latest reason: {latest_summary_signals.get('reason') or 'n/a'}",
+        f"- Latest run type: {latest_summary_signals.get('run_type') or 'n/a'}",
+        f"- Latest reuse mode: {latest_summary_signals.get('reuse_mode') or 'n/a'}",
+        f"- Latest artifact integrity: {latest_summary_signals.get('artifact_integrity_kind') or 'none'}",
+        f"- Latest diagnostics keys: {', '.join(latest_summary_signals.get('diagnostics_keys') or []) or 'none'}",
+        f"- Dominant cost phase: {payload.get('dominant_cost_phase') or 'n/a'}",
+        f"- Step duration totals: {_format_metric_map(step_duration_totals) or 'none'}",
+        f"- Step duration avg: {_format_metric_map(step_duration_avg) or 'none'}",
+        f"- Round failure kind counts: {_format_metric_map(round_failure_kind_counts) or 'none'}",
+        f"- Chapter6 next action: {chapter6_hints.get('next_action') or 'n/a'}",
+        f"- Chapter6 can skip 6.7: {bool(chapter6_hints.get('can_skip_6_7'))}",
+        f"- Chapter6 can go to 6.8: {bool(chapter6_hints.get('can_go_to_6_8'))}",
+        f"- Chapter6 blocked by: {chapter6_hints.get('blocked_by') or 'n/a'}",
+        f"- Chapter6 rerun forbidden: {bool(chapter6_hints.get('rerun_forbidden'))}",
+        f"- Chapter6 rerun override: {chapter6_hints.get('rerun_override_flag') or 'n/a'}",
+        f"- Chapter6 stop-loss note: {chapter6_stop_loss_note or 'n/a'}",
+        f"- Approval required action: {approval.get('required_action') or 'n/a'}",
+        f"- Approval status: {approval.get('status') or 'n/a'}",
+        f"- Approval decision: {approval.get('decision') or 'n/a'}",
+        f"- Approval recommended action: {approval.get('recommended_action') or 'n/a'}",
+        f"- Approval allowed actions: {', '.join(str(item).strip() for item in list(approval.get('allowed_actions') or []) if str(item).strip()) or 'none'}",
+        f"- Approval blocked actions: {', '.join(str(item).strip() for item in list(approval.get('blocked_actions') or []) if str(item).strip()) or 'none'}",
+        f"- Approval reason: {approval.get('reason') or 'n/a'}",
+        f"- Recommended command: `{payload.get('recommended_command')}`" if payload.get("recommended_command") else "- Recommended command: n/a",
+        f"- Forbidden commands: {', '.join(f'`{item}`' for item in list(payload.get('forbidden_commands') or []))}" if list(payload.get("forbidden_commands") or []) else "- Forbidden commands: none",
+        f"- Resume summary command: `{commands.get('resume_summary')}`" if commands.get("resume_summary") else "- Resume summary command: n/a",
+        f"- Inspect command: `{commands.get('inspect')}`" if commands.get("inspect") else "- Inspect command: n/a",
+        f"- Resume command: `{commands.get('resume')}`" if commands.get("resume") else "- Resume command: n/a",
+        f"- Fork command: `{commands.get('fork')}`" if commands.get("fork") else "- Fork command: n/a",
+        f"- Rerun command: `{commands.get('rerun')}`" if commands.get("rerun") else "- Rerun command: n/a",
+        f"- Needs Fix command: `{commands.get('needs_fix_fast')}`" if commands.get("needs_fix_fast") else "- Needs Fix command: n/a",
+    ]
+    if profile_drift:
+        lines.append(f"- Diagnostics profile_drift: True ({profile_drift.get('previous_delivery_profile')} -> {profile_drift.get('current_delivery_profile')})")
+    if waste_signals:
+        lines.append(
+            f"- Diagnostics unit_failed_but_engine_lane_ran: {bool(waste_signals.get('unit_failed_but_engine_lane_ran'))}"
+        )
+    if rerun_guard:
+        lines.append(
+            f"- Diagnostics rerun_guard: blocked={bool(rerun_guard.get('blocked'))} kind={rerun_guard.get('kind') or 'n/a'} recommended_path={rerun_guard.get('recommended_path') or 'n/a'}"
+        )
+    if reuse_decision:
+        lines.append(
+            f"- Diagnostics reuse_decision: mode={reuse_decision.get('mode') or 'n/a'}"
+        )
+    if llm_timeout_memory:
+        override_keys = ",".join(sorted(str(key) for key in dict(llm_timeout_memory.get("overrides") or {}).keys())) or "none"
+        lines.append(f"- Diagnostics llm_timeout_memory: overrides={override_keys}")
+    if llm_retry_stop_loss:
+        lines.append(
+            f"- Diagnostics llm_retry_stop_loss: blocked={bool(llm_retry_stop_loss.get('blocked'))} kind={llm_retry_stop_loss.get('kind') or 'n/a'} step_name={llm_retry_stop_loss.get('step_name') or 'n/a'}"
+        )
+    sc_test_retry_stop_loss = diagnostics.get("sc_test_retry_stop_loss") if isinstance(diagnostics.get("sc_test_retry_stop_loss"), dict) else {}
+    if sc_test_retry_stop_loss:
+        lines.append(
+            f"- Diagnostics sc_test_retry_stop_loss: blocked={bool(sc_test_retry_stop_loss.get('blocked'))} kind={sc_test_retry_stop_loss.get('kind') or 'n/a'} step_name={sc_test_retry_stop_loss.get('step_name') or 'n/a'}"
+        )
+    artifact_integrity = diagnostics.get("artifact_integrity") if isinstance(diagnostics.get("artifact_integrity"), dict) else {}
+    if artifact_integrity:
+        lines.append(
+            f"- Diagnostics artifact_integrity: blocked={bool(artifact_integrity.get('blocked'))} kind={artifact_integrity.get('kind') or 'n/a'}"
+        )
+    recent_failure_summary = diagnostics.get("recent_failure_summary") if isinstance(diagnostics.get("recent_failure_summary"), dict) else {}
+    if recent_failure_summary:
+        lines.append(
+            f"- Diagnostics recent_failure_summary: family={recent_failure_summary.get('latest_failure_family') or 'n/a'} same_family_count={int(recent_failure_summary.get('same_family_count') or 0)} stop_full_rerun_recommended={bool(recent_failure_summary.get('stop_full_rerun_recommended'))}"
+        )
+    if run_event_summary:
+        family_counts = ", ".join(f"{key}={value}" for key, value in dict(run_event_summary.get("family_counts") or {}).items()) or "none"
+        latest_turn_family_counts = ", ".join(
+            f"{key}={value}" for key, value in dict(run_event_summary.get("latest_turn_family_counts") or {}).items()
+        ) or "none"
+        previous_turn_family_counts = ", ".join(
+            f"{key}={value}" for key, value in dict(run_event_summary.get("previous_turn_family_counts") or {}).items()
+        ) or "none"
+        turn_family_delta = ", ".join(
+            f"{key}={'+' if int(value) > 0 else ''}{int(value)}" for key, value in dict(run_event_summary.get("turn_family_delta") or {}).items()
+        ) or "none"
+        lines.extend(
+            [
+                f"- Run events path: `{run_event_summary.get('path')}`" if run_event_summary.get("path") else "- Run events path: n/a",
+                f"- Run events event count: {int(run_event_summary.get('event_count') or 0)}",
+                f"- Run events turn count: {int(run_event_summary.get('turn_count') or 0)}",
+                f"- Run events latest turn: {run_event_summary.get('latest_turn_id') or 'n/a'} seq={int(run_event_summary.get('latest_turn_seq') or 0)}",
+                f"- Run events previous turn: {run_event_summary.get('previous_turn_id') or 'n/a'} seq={int(run_event_summary.get('previous_turn_seq') or 0)}",
+                f"- Run events latest event: {run_event_summary.get('latest_event') or 'n/a'}",
+                f"- Run events families: {family_counts}",
+                f"- Run events previous turn families: {previous_turn_family_counts}",
+                f"- Run events latest turn families: {latest_turn_family_counts}",
+                f"- Run events turn family delta: {turn_family_delta}",
+                f"- Run events new reviewers: {', '.join(str(item) for item in list(run_event_summary.get('new_reviewers') or [])) or 'none'}",
+                f"- Run events new sidecars: {', '.join(str(item) for item in list(run_event_summary.get('new_sidecars') or [])) or 'none'}",
+                f"- Run events approval changed: {bool(run_event_summary.get('approval_changed'))}",
+                f"- Reviewer activity: {'; '.join(str(item) for item in list(run_event_summary.get('reviewers') or [])) or 'none'}",
+                f"- Sidecar activity: {'; '.join(str(item) for item in list(run_event_summary.get('sidecars') or [])) or 'none'}",
+                f"- Approval activity: {run_event_summary.get('approval') or 'none'}",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def write_active_task_sidecar(
+    *,
+    task_id: str,
+    run_id: str,
+    status: str,
+    out_dir: Path,
+    latest_json_path: Path,
+    root: Path | None = None,
+) -> tuple[Path, Path]:
+    resolved_root = root.resolve() if root else _infer_root_from_paths(latest_json_path=latest_json_path, out_dir=out_dir)
+    payload = build_active_task_payload(
+        task_id=task_id,
+        run_id=run_id,
+        status=status,
+        out_dir=out_dir,
+        latest_json_path=latest_json_path,
+        root=resolved_root,
+    )
+    validate_active_task_payload(payload)
+    json_path = active_task_json_path(task_id, resolved_root)
+    md_path = active_task_md_path(task_id, resolved_root)
+    write_json(json_path, payload)
+    write_text(md_path, render_active_task_markdown(payload))
+    return json_path, md_path
